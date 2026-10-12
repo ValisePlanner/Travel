@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="pt-br"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diagnóstico PWA</title>
+<link rel="manifest" href="manifest.json">
+<style>
+body{font-family:system-ui,sans-serif;margin:0;padding:16px;background:#f7f7f2;color:#2c2e26;font-size:15px}
+h1{font-size:1.1rem;margin:0 0 12px}
+.row{background:#fff;border:1px solid #e8e6dd;border-radius:12px;padding:10px 12px;margin-bottom:8px;word-break:break-word}
+.ok{border-left:5px solid #6b8e23}.bad{border-left:5px solid #c65b4e}.warn{border-left:5px solid #c9973a}
+.t{font-weight:700}.d{font-size:.82rem;color:#555;margin-top:3px;white-space:pre-wrap}
+button{padding:11px 16px;border-radius:10px;border:0;background:#6b8e23;color:#fff;font-weight:700;margin:4px 6px 12px 0}
+</style></head><body>
+<h1>Diagnóstico de instalação (PWA)</h1>
+<button onclick="location.reload()">Rodar de novo</button>
+<button id="btnReg">Registrar sw.js agora</button>
+<button id="btnInstall" style="display:none">Instalar</button>
+<div id="out"></div>
+<script>
+const out=document.getElementById('out');
+function add(level,title,detail){const d=document.createElement('div');d.className='row '+level;
+ d.innerHTML='<div class="t">'+(level==='ok'?'✅ ':level==='bad'?'❌ ':'⚠️ ')+title+'</div>'+(detail?'<div class="d"></div>':'');
+ if(detail)d.lastChild.textContent=detail; out.appendChild(d);}
+let deferred=null;
+window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferred=e;
+ document.getElementById('btnInstall').style.display='inline-block';
+ add('ok','Chrome disparou beforeinstallprompt','O navegador considera o app instalável. Use o botão "Instalar".');});
+document.getElementById('btnInstall').onclick=()=>deferred&&deferred.prompt();
+document.getElementById('btnReg').onclick=async()=>{try{const r=await navigator.serviceWorker.register('./sw.js');add('ok','sw.js registrado','escopo: '+r.scope+' — recarregue o diagnóstico');}catch(e){add('bad','Falha ao registrar sw.js',String(e));}};
+
+(async()=>{
+ add(location.protocol==='https:'||location.hostname==='localhost'?'ok':'bad','Contexto seguro (HTTPS)',location.href);
+ add(matchMedia('(display-mode: standalone)').matches?'warn':'ok','Modo de exibição', matchMedia('(display-mode: standalone)').matches?'Já está rodando como app instalado.':'Rodando no navegador (normal).');
+ let man=null;
+ try{
+  const link=document.querySelector('link[rel=manifest]').href;
+  const r=await fetch(link,{cache:'reload'});
+  const ct=r.headers.get('content-type')||'';
+  if(!r.ok){add('bad','manifest.json não encontrado (HTTP '+r.status+')',link);}
+  else{
+   const txt=await r.text();
+   try{man=JSON.parse(txt);add('ok','manifest.json carregado e válido','URL: '+link+'\ncontent-type: '+ct);}
+   catch(e){add('bad','manifest.json NÃO é um JSON válido (provável página HTML de erro)',link+'\ncontent-type: '+ct+'\n'+txt.slice(0,120));}
+  }
+  if(man){
+   const base=new URL(link);
+   const start=new URL(man.start_url||'.',base), scope=new URL(man.scope||'.',base);
+   add('ok','start_url / scope','start_url: '+start.href+'\nscope: '+scope.href);
+   add(start.href.startsWith(scope.href)?'ok':'bad','start_url está dentro do scope');
+   add(location.href.startsWith(scope.href)?'ok':'bad','Esta página está dentro do scope');
+   add(man.display==='standalone'||man.display==='fullscreen'||man.display==='minimal-ui'?'ok':'bad','display = '+man.display);
+   add(man.name||man.short_name?'ok':'bad','name/short_name',(man.name||'')+' / '+(man.short_name||''));
+   const icons=man.icons||[];let has192=false,has512=false;
+   for(const ic of icons){
+    const u=new URL(ic.src,base).href;
+    try{
+     const rr=await fetch(u,{cache:'reload'});
+     if(!rr.ok){add('bad','Ícone '+ic.sizes+' falhou (HTTP '+rr.status+')',u);continue;}
+     const blob=await rr.blob();
+     const dim=await new Promise(res=>{const i=new Image();i.onload=()=>res(i.naturalWidth+'x'+i.naturalHeight);i.onerror=()=>res('ERRO');i.src=URL.createObjectURL(blob);});
+     const okSize=dim===ic.sizes;
+     add(okSize?'ok':'bad','Ícone '+ic.sizes+' ('+(ic.purpose||'any')+')','real: '+dim+' · '+blob.type+'\n'+u);
+     if((ic.purpose||'any').includes('any')){ if(dim==='192x192')has192=true; if(dim==='512x512')has512=true; }
+    }catch(e){add('bad','Ícone não carregou',u+'\n'+e);}
+   }
+   add(has192&&has512?'ok':'bad','Ícones "any" 192 e 512 presentes');
+  }
+ }catch(e){add('bad','Erro ao ler manifest',String(e));}
+
+ if(!('serviceWorker' in navigator)){add('bad','Service worker não suportado aqui');}
+ else{
+  const regs=await navigator.serviceWorker.getRegistrations();
+  if(!regs.length)add('bad','Nenhum service worker registrado nesta origem','Abra o index.html do app uma vez (ele registra o sw.js) ou use "Registrar sw.js agora".');
+  regs.forEach(r=>{const w=r.active||r.waiting||r.installing;
+   add(r.active?'ok':'bad','SW '+(r.active?'ATIVO':'NÃO ativo ('+(w?w.state:'?')+')'),'escopo: '+r.scope+'\nscript: '+(w?w.scriptURL:'?'));});
+  add(navigator.serviceWorker.controller?'ok':'warn','Esta página é controlada por um SW',navigator.serviceWorker.controller?navigator.serviceWorker.controller.scriptURL:'Normal na 1ª visita; recarregue.');
+  try{const t=await (await fetch('./sw.js',{cache:'reload'})).text();
+   add(/addEventListener\(\s*['"]fetch['"]/.test(t)?'ok':'bad','sw.js tem handler de fetch');
+   const v=t.match(/CACHE_VERSION\s*=\s*'([^']+)'/);add('ok','Versão do sw.js no servidor: '+(v?v[1]:'?'));
+  }catch(e){add('bad','sw.js inacessível',String(e));}
+ }
+ setTimeout(()=>{if(!deferred)add('warn','beforeinstallprompt NÃO disparou','Se tudo acima está ✅: o app pode já estar instalado, estar em aba anônima, ou o Chrome ainda não reavaliou — limpe os dados do site e reabra.');},4000);
+})();
+</script></body></html>
